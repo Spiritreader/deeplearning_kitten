@@ -3,6 +3,7 @@ import numpy as np
 from sys import maxsize
 from PIL import Image
 import matplotlib.pyplot as plt
+from math import floor
 
 
 def plot_image(params):
@@ -49,7 +50,7 @@ def vignetting_rgb(i, r, params):
     return img_out
 
 
-def data_loader():
+def data_loader(fold=0, shift=0):
     kitten_vig = []
     kitten = []
     kitten_vig.append(np.array(Image.open("cat_01_vignetted.jpg")))
@@ -61,12 +62,36 @@ def data_loader():
 
     r_flat = list(map(lambda x: np.repeat(get_r_matrix(x)[:, :, np.newaxis], 3, axis=2).flatten(), kitten_vig))
     kitten_vig_flat = list(map(lambda x: x.flatten(), kitten_vig))
-
-    # kitten_flattened_r = list(map(lambda x: get_r_matrix(x).flatten(), kitten))
     kitten_flat = list(map(lambda x: x.flatten(), kitten))
-    # res = vignetting(kitten_flat[0], r_flat[0], [1.0, -0.3, 0.05, -0.25, -0.4, -0.05, 0.1])
 
-    return {X: kitten_vig_flat, Y: r_flat, Z: kitten_flat}
+    r_per_pixel = np.array(r_flat).flatten()
+    kitten_vig_per_pixel = np.array(kitten_vig_flat).flatten()
+    kitten_per_pixel = np.array(kitten_flat).flatten()
+
+    if fold == 0:
+        return {X: kitten_vig_per_pixel, Y: r_per_pixel, Z: kitten_per_pixel}, \
+               {X: [], Y: [], Z: []}, \
+               kitten_vig_per_pixel.shape[0]
+
+    total_elements = r_per_pixel.shape
+    training_elements = floor(total_elements / fold)
+    shift_base = shift * training_elements
+    shift_target = (shift+1) * training_elements
+
+    if shift == (fold - 1):
+        shift_target = training_elements - 1
+
+    r_train = r_per_pixel[0:shift_base] + r_per_pixel[min(shift_target + 1, training_elements - 1):training_elements - 1]
+    vig_train = kitten_vig_per_pixel[0:shift_base] + r_per_pixel[min(shift_target + 1, training_elements - 1):training_elements - 1]
+    kitten_train = kitten_per_pixel[0:shift_base] + r_per_pixel[min(shift_target + 1, training_elements - 1):training_elements - 1]
+
+    r_vali = r_per_pixel[shift_base:shift_target]
+    vig_vali = kitten_vig_per_pixel[shift_base:shift_target]
+    kitten_vali = kitten_per_pixel[shift_base:shift_target]
+
+    return {X: vig_train, Y: r_train, Z: kitten_train},\
+           {X: vig_vali, Y: r_vali, Z: kitten_vali}, vig_train.shape[0]
+    # return {X: kitten_vig_flat, Y: r_flat, Z: kitten_flat}
 
 
 def get_r_matrix(img):
@@ -90,9 +115,9 @@ def generate_parameters(num=7):
     return params
 
 
-X = tf.placeholder(tf.float32, [None, None])
-Y = tf.placeholder(tf.float32, [None, None])
-Z = tf.placeholder(tf.float32, [None, None])
+X = tf.placeholder(tf.float32, None)
+Y = tf.placeholder(tf.float32, None)
+Z = tf.placeholder(tf.float32, None)
 
 # 4 works well with 0.03 convergence
 parameters = generate_parameters(3)
@@ -103,8 +128,8 @@ gvi.run(session=sess)
 
 intensity = vignetting(X, Y, parameters)
 
-feed_dict = data_loader()
-result = sess.run(parameters, feed_dict=feed_dict)
+feed_dict_train, feed_dict_vali, data_amount = data_loader()
+result = sess.run(parameters, feed_dict=feed_dict_train)
 print(result)
 
 optimizer = tf.train.GradientDescentOptimizer(1e-6)
@@ -112,13 +137,18 @@ loss = tf.losses.mean_squared_error(X, intensity)
 minimizer_step = optimizer.minimize(loss)
 
 epoch = 0
-previous_loss = sess.run(loss, feed_dict=feed_dict)
+iter = 0
+previous_loss = sess.run(loss, feed_dict=feed_dict_train)
 convergence = 0.04
 
 while True:
     print('Epoch: {0}'.format(epoch))
-    epoch += 1
-    pars, step, current_loss = sess.run([parameters, minimizer_step, loss], feed_dict=feed_dict)
+    print('Step: {0} / {1}'.format(iter, data_amount))
+    iter += 1
+    if (iter % data_amount) == 0:
+        epoch += 1
+
+    pars, step, current_loss = sess.run([parameters, minimizer_step, loss], feed_dict=feed_dict_train)
     print('Parameters: {0}'.format(str(pars)))
     print('Current loss: {0}'.format(current_loss))
     if previous_loss > current_loss:
